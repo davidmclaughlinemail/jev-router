@@ -189,16 +189,27 @@ async function decide($: EngineInterface, text: string): Promise<Decision> {
       route = picked
       decidedBy = 'you'
       reason = `Jev unsure (${pct(c.confidence)}); you picked ${route}`
+    } else if (route === 'fable' && S.opt.confirmFable) {
+      // Nobody picked, and Fable needs a yes: don't spend it unasked.
+      route = 'opus'
+      decidedBy = 'rule'
+      reason = `Jev unsure (${pct(c.confidence)}) and nobody picked; Fable needs a yes, so Opus`
     }
   } else if (route === 'fable' && S.opt.confirmFable && decidedBy === 'jev') {
-    const answer = await askSafely($, `Jev wants Fable 5.1 for this turn (${pct(c.confidence)}). Use it?`, [
-      'Fable 5.1',
-      'Opus 5.5',
-    ])
+    const answer = await askSafely(
+      $,
+      `${classifierName(c)} wants Fable 5.1 for this turn (${pct(c.confidence)}). Use it?`,
+      ['Fable 5.1', 'Opus 5.5'],
+    )
     if (answer === 'Opus 5.5') {
       route = 'opus'
       decidedBy = 'you'
       reason = 'you chose Opus over Fable'
+    } else if (answer !== 'Fable 5.1') {
+      // Dismissed, or a -p run with nobody to ask: Fable runs only on a yes.
+      route = 'opus'
+      decidedBy = 'rule'
+      reason = 'nobody confirmed Fable, so Opus'
     }
   }
 
@@ -320,8 +331,10 @@ function explain(d: Decision | undefined, o: Override | undefined): string {
 // ---------- status and log ----------
 
 function showStatus($: EngineInterface, d: Decision) {
-  const conf = d.classification ? ` ${pct(d.classification.confidence)}` : ''
-  const who = d.decidedBy === 'jev' ? 'Jev' : d.decidedBy
+  const c = d.classification
+  // decidedBy 'jev' means "the classifier's pick", which is Haiku or the default when Jev is unavailable.
+  const who = d.decidedBy === 'jev' && c ? classifierName(c) : d.decidedBy
+  const conf = c && c.source !== 'default' ? ` ${pct(c.confidence)}` : ''
   const tier = d.route === 'image' ? ` ${d.imageTier}` : ''
   const lock = S.override?.sticky ? ' [locked]' : ''
   $.ui.status(`${LABEL[d.route]}${tier} (${who}${conf})${lock}`)
@@ -425,6 +438,10 @@ function pickTier(x: unknown): ImageTier {
 }
 
 // ---------- helpers ----------
+
+function classifierName(c: Classification): string {
+  return c.source === 'jev' ? 'Jev' : c.source === 'fallback-haiku' ? 'Haiku' : 'default'
+}
 
 function pct(x: number): string {
   return `${Math.round(x * 100)}%`

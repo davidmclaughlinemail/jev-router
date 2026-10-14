@@ -1,0 +1,6 @@
+{
+  "env": {
+    "OPENAI_API_KEY": "sk-...",
+    "TYPESAFE_API_KEY": ""
+  }
+}

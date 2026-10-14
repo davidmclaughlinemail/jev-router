@@ -166,6 +166,39 @@ describe('routing', () => {
     expect(seen.stepModels).toEqual(['claude-opus-5-5'])
   })
 
+  test('an unanswered Fable confirmation runs Opus', async ($, on) => {
+    const seen = world(on, { jev: jevBody({ fable: 0.88, opus: 0.1, haiku: 0.02, image: 0 }) })
+    await $.prompt.submit(submit('Redesign the whole data layer across all services'))
+    await drain($.turn.step(STEP))
+    expect(seen.asked.length).toBe(1)
+    expect(seen.stepModels).toEqual(['claude-opus-5-5'])
+    const why = await $.command.run(route('why'))
+    expect(why.text).toContain('nobody confirmed Fable')
+  })
+
+  test('Jev unsure with Fable on top, nobody picks: Opus', async ($, on) => {
+    const seen = world(on, { jev: jevBody({ fable: 0.5, opus: 0.45, haiku: 0.05, image: 0 }) })
+    await $.prompt.submit(submit('Should we split the monolith into services?'))
+    await drain($.turn.step(STEP))
+    expect(seen.asked.length).toBe(1)
+    expect(seen.stepModels).toEqual(['claude-opus-5-5'])
+  })
+
+  test('a Fable confirmation that says yes runs Fable', async ($, on) => {
+    const seen = world(on, { jev: jevBody({ fable: 0.88, opus: 0.1, haiku: 0.02, image: 0 }), answer: 'Fable 5.1' })
+    await $.prompt.submit(submit('Redesign the whole data layer across all services'))
+    await drain($.turn.step(STEP))
+    expect(seen.stepModels).toEqual(['claude-fable-5-1'])
+  })
+
+  test('the Haiku fallback asks before Fable too, naming Haiku', async ($, on) => {
+    const seen = world(on, { env: { OPENAI_API_KEY: 'x' }, haikuWord: 'fable' })
+    await $.prompt.submit(submit('Design the architecture for the whole codebase'))
+    await drain($.turn.step(STEP))
+    expect(seen.asked[0]).toContain('Haiku wants Fable 5.1')
+    expect(seen.stepModels).toEqual(['claude-opus-5-5'])
+  })
+
   test('security work never goes to Fable', async ($, on) => {
     const seen = world(on, { jev: jevBody({ fable: 0.9, opus: 0.08, haiku: 0.02, image: 0 }, { security: 0.93 }) })
     await $.prompt.submit(submit('Audit our auth service for injection vulnerabilities'))
@@ -189,6 +222,14 @@ describe('routing', () => {
     await drain($.turn.step(STEP))
     expect(seen.fetched).toEqual([])
     expect(seen.stepModels).toEqual(['claude-haiku-5-5'])
+    // The status line credits whoever routed, not Jev.
+    expect(seen.status.at(-1)).toBe('Haiku 5.5 (Haiku 75%)')
+  })
+
+  test('with both classifiers down, the status line says default', async ($, on) => {
+    const seen = world(on, { env: { OPENAI_API_KEY: 'x' }, haikuWord: 'gibberish' })
+    await $.prompt.submit(submit('Fix the flaky date test'))
+    expect(seen.status.at(-1)).toBe('Opus 5.5 (default)')
   })
 
   test('Jev down falls back without blocking the prompt', async ($, on) => {
@@ -248,6 +289,14 @@ describe('/route', () => {
 })
 
 describe('options', () => {
+  test('confirmFable off runs Fable without asking', { options: { confirmFable: false } }, async ($, on) => {
+    const seen = world(on, { jev: jevBody({ fable: 0.88, opus: 0.1, haiku: 0.02, image: 0 }) })
+    await $.prompt.submit(submit('Redesign the whole data layer across all services'))
+    await drain($.turn.step(STEP))
+    expect(seen.asked).toEqual([])
+    expect(seen.stepModels).toEqual(['claude-fable-5-1'])
+  })
+
   test('model ids come from settings', { options: { opusModel: 'claude-opus-5-5-20261001' } }, async ($, on) => {
     const seen = world(on, { jev: jevBody({ opus: 0.9, haiku: 0.1, fable: 0, image: 0 }) })
     await $.prompt.submit(submit('Refactor the billing module'))

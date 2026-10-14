@@ -32,7 +32,9 @@ The route descriptions Jev scores against live in `hooks/jev.ts` (`ROUTE_CRITERI
 - `TYPESAFE_API_KEY`: a Jev key from console.typesafe.ai (early access). Without it the router still works on the Haiku fallback.
 - `OPENAI_API_KEY`: needs access to `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst`
 
-Put the keys in your shell profile or in `~/.claude/settings.json` under `env`.
+Put the keys in your shell profile or in `~/.claude/settings.json` under `env`. There is no `.env` file: the mod reads Claude Code's own environment.
+
+To test in one folder without touching your global settings, copy `examples/settings.local.json` to `<test folder>/.claude/settings.local.json`, fill in the keys, and start `claude --plugin-dir <path to jev-router>` from that folder. The keys apply to that folder only. The mod itself still needs `--plugin-dir`, because `CLAUDE_CODE_PLUGIN_DIRS` in a folder's settings does not load it.
 
 ## Install
 
