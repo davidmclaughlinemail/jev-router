@@ -49,6 +49,10 @@ function world(on: On, w: World): Seen {
 
   on('fs.exists', async ($, e) => ({ value: findFile(seen, e.path) !== undefined }))
   on('fs.read', async ($, e) => ({ value: findFile(seen, e.path) ?? '' }))
+  // Every path resolves under /abs, so tests can tell absolute paths from relative ones.
+  on('fs.stat', async ($, e) => ({
+    value: { kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false, realPath: `/abs/${e.path.replaceAll('\\', '/').split('/').slice(-2).join('/')}` },
+  }))
   on('fs.write', async ($, e) => {
     seen.files.set(e.path, e.text)
     return { value: undefined }
@@ -305,8 +309,10 @@ describe('options', () => {
   })
 })
 
-describe('image tools', () => {
-  test('generate_image calls Images 2.5 and decodes the result to a file', async ($, on) => {
+const API = { options: { imageBackend: 'api' } }
+
+describe('image tools (api backend)', () => {
+  test('generate_image calls Images 2.5 and decodes the result to a file', API, async ($, on) => {
     const seen = world(on, { jev: { data: [{ b64_json: 'iVBORw0KGgo=' }] } })
     const runs: { argv: readonly string[]; stdin?: string }[] = []
     on('process.run', async ($, e) => {
@@ -328,13 +334,13 @@ describe('image tools', () => {
     expect(String((r as { result?: unknown }).result)).toContain('Saved assets/generated/fox.png')
   })
 
-  test('without an OpenAI key the tool says so instead of failing', async ($, on) => {
+  test('without an OpenAI key the tool says so instead of failing', API, async ($, on) => {
     world(on, { env: { TYPESAFE_API_KEY: 'k' } })
     const r = await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'x' } as never)
     expect(String((r as { result?: unknown }).result)).toContain('OPENAI_API_KEY is not set')
   })
 
-  test('edit_image keeps the key off the command line', async ($, on) => {
+  test('edit_image keeps the key off the command line', API, async ($, on) => {
     const seen = world(on, {})
     seen.files.set('logo.png', 'binary')
     on('process.run', async ($, e) => {
@@ -355,13 +361,13 @@ describe('image tools', () => {
   })
 })
 
-describe('image tools on Windows', () => {
+describe('image tools on Windows (api backend)', () => {
   const WINDOWS_ENV = { OPENAI_API_KEY: 'test-openai', OS: 'Windows_NT', SystemRoot: 'C:\\Windows' }
   const ok = (stdout = '') => ({
     value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
 
-  test('generate_image decodes with System32 PowerShell, not mkdir or openssl', async ($, on) => {
+  test('generate_image decodes with System32 PowerShell, not mkdir or openssl', API, async ($, on) => {
     world(on, { env: WINDOWS_ENV, jev: { data: [{ b64_json: 'iVBORw0KGgo=' }] } })
     const runs: { argv: readonly string[]; stdin?: string; env?: Record<string, string> }[] = []
     on('process.run', async ($, e) => {
@@ -379,7 +385,7 @@ describe('image tools on Windows', () => {
     expect(String((r as { result?: unknown }).result)).toContain('Saved assets/generated/fox.png')
   })
 
-  test('edit_image runs System32 curl, which creates the output folder itself', async ($, on) => {
+  test('edit_image runs System32 curl, which creates the output folder itself', API, async ($, on) => {
     const seen = world(on, { env: WINDOWS_ENV })
     seen.files.set('logo.png', 'binary')
     const argv0: string[] = []
@@ -398,5 +404,90 @@ describe('image tools on Windows', () => {
       'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
     ])
     expect(String((r as { result?: unknown }).result)).toContain('Saved')
+  })
+})
+
+describe('image tools (codex backend, the default)', () => {
+  const WINDOWS = { OS: 'Windows_NT', SystemRoot: 'C:\\Windows', ProgramFiles: 'C:\\Program Files', APPDATA: 'C:\\Users\\dev\\AppData\\Roaming' }
+  const NODE = 'C:\\Program Files\\nodejs\\node.exe'
+  const CODEX_JS = 'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js'
+  const result = (r: unknown) => String((r as { result?: unknown }).result)
+
+  // Codex is answered in memory: it "saves" the file it was asked for unless told to fail.
+  function codex(on: Parameters<typeof world>[0], seen: Seen, behave: { exitCode?: number; save?: boolean } = {}) {
+    const runs: { argv: readonly string[]; stdin?: string }[] = []
+    on('process.run', async ($, e) => {
+      runs.push({ argv: e.argv, stdin: e.init?.stdin })
+      const target = /absolute path: (\S+)/.exec(e.init?.stdin ?? '')?.[1] ?? ''
+      if (behave.save !== false) seen.files.set(`assets/generated/${target.slice(target.lastIndexOf('/') + 1)}`, 'png')
+      return { value: { exitCode: behave.exitCode ?? 0, stdout: '', stderr: behave.exitCode ? 'boom' : '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    return runs
+  }
+
+  test('generate_image runs codex exec on Windows through node and codex.js, no API key needed', async ($, on) => {
+    const seen = world(on, { env: WINDOWS })
+    seen.files.set(NODE, 'exe')
+    seen.files.set(CODEX_JS, 'js')
+    const runs = codex(on, seen)
+    const r = await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'A red fox logo', tier: 'sunburst', filename: 'fox' } as never)
+
+    expect(runs.length).toBe(1)
+    const argv = runs[0]?.argv ?? []
+    expect(argv.slice(0, 3)).toEqual([NODE, CODEX_JS, 'exec'])
+    // Sandboxed to the image folder, request on stdin, nothing from the prompt on the command line.
+    expect(argv).toContain('workspace-write')
+    expect(argv[argv.indexOf('-C') + 1]).toBe('/abs/assets/generated')
+    expect(argv.at(-1)).toBe('-')
+    expect(argv.join(' ')).not.toContain('red fox')
+    expect(runs[0]?.stdin).toContain('Request: A red fox logo')
+    expect(runs[0]?.stdin).toContain('production-ready')
+    expect(runs[0]?.stdin).toContain('absolute path: /abs/assets/generated/fox.png')
+    expect(seen.fetched).toEqual([])
+    expect(result(r)).toBe('Saved assets/generated/fox.png (codex (ChatGPT plan)).')
+  })
+
+  test('edit_image attaches the sources with -i, as absolute paths', async ($, on) => {
+    const seen = world(on, { env: {} })
+    seen.files.set('logo.png', 'png')
+    const runs = codex(on, seen)
+    const r = await $.tool.call({ tool: 'mcp__jev-router__edit_image', image_paths: ['logo.png'], prompt: 'Make it blue', filename: 'blue' } as never)
+    const argv = runs[0]?.argv ?? []
+    expect(argv[0]).toBe('codex')
+    expect(argv[argv.indexOf('-i') + 1]).toMatch(/^\/abs\/.*logo\.png$/)
+    expect(runs[0]?.stdin).toContain('edit the attached image')
+    expect(result(r)).toContain('Saved assets/generated/blue.png')
+  })
+
+  test('a codex run that saves nothing is reported, not trusted', async ($, on) => {
+    const seen = world(on, { env: {} })
+    codex(on, seen, { save: false })
+    const r = await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'x', filename: 'x' } as never)
+    expect(result(r)).toContain('Codex finished without saving')
+  })
+
+  test('a failing codex run reports its exit code', async ($, on) => {
+    const seen = world(on, { env: {} })
+    codex(on, seen, { exitCode: 2 })
+    const r = await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'x' } as never)
+    expect(result(r)).toContain('codex exited 2: boom')
+  })
+
+  test('missing Codex on Windows says how to fix it', async ($, on) => {
+    const seen = world(on, { env: WINDOWS })
+    seen.files.set(NODE, 'exe')
+    const runs = codex(on, seen)
+    const r = await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'x' } as never)
+    expect(runs).toEqual([])
+    expect(result(r)).toContain('npm install -g @openai/codex')
+  })
+
+  test('codexPath overrides where Codex is', { options: { codexPath: 'D:\\tools\\codex.js' } }, async ($, on) => {
+    const seen = world(on, { env: WINDOWS })
+    seen.files.set(NODE, 'exe')
+    seen.files.set('D:\\tools\\codex.js', 'js')
+    const runs = codex(on, seen)
+    await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'x' } as never)
+    expect(runs[0]?.argv.slice(0, 2)).toEqual([NODE, 'D:\\tools\\codex.js'])
   })
 })

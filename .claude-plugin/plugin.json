@@ -46,6 +46,19 @@
       "description": "Where generated and edited images are saved, relative to the project.",
       "default": "assets/generated"
     },
+    "imageBackend": {
+      "type": "string",
+      "title": "Image backend",
+      "description": "codex: generate through the Codex CLI on your ChatGPT plan (sign in with `codex login`). api: the OpenAI Images API, billed to OPENAI_API_KEY.",
+      "options": ["codex", "api"],
+      "default": "codex"
+    },
+    "codexPath": {
+      "type": "string",
+      "title": "Codex location",
+      "description": "Leave empty to find Codex automatically. Otherwise the path to codex.js (Windows) or the codex executable.",
+      "default": ""
+    },
     "logPath": {
       "type": "string",
       "title": "Decision log",

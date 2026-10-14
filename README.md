@@ -5,7 +5,7 @@ A Claude Code mod that routes every turn to the right model.
 - **Jev decides.** Each prompt goes to TypeSafe's Jev, which returns a calibrated choice between Haiku, Opus, Fable and image work, plus two side checks (is this security work, is this a premium image).
 - **You stay in control.** When Jev's confidence is under your threshold, a question pops up showing its ranking and you pick. Fable always asks first (configurable). `/route` overrides, locks, and explains.
 - **Routing is enforced, not suggested.** A `turn.step` hook sends every model request of the turn to the chosen model, and subagents that don't name a model follow the same route.
-- **All graphics go to OpenAI Images 2.5.** The mod gives Claude two tools, `generate_image` and `edit_image`. Image turns run on Haiku, which just drives those tools. Flare is the default tier; Sunburst is used when Jev flags a premium asset or Claude asks for it.
+- **All graphics go to OpenAI.** The mod gives Claude two tools, `generate_image` and `edit_image`. By default they run through the Codex CLI on your ChatGPT plan, so no API key is needed; set `imageBackend` to `api` to use the Images API instead. Image turns run on Haiku, which just drives those tools. Flare is the default tier; Sunburst is used when Jev flags a premium asset or Claude asks for it.
 
 ## Routing policy
 
@@ -14,7 +14,7 @@ A Claude Code mod that routes every turn to the right model.
 | haiku | `claude-haiku-5-5` | Lookups, small edits, summaries, commit messages, chat |
 | opus | `claude-opus-5-5` | Ordinary engineering, and the fallback for everything |
 | fable | `claude-fable-5-1` | Architecture, long agentic work, deep ambiguous problems |
-| image | Haiku + `gpt-image-2.5-flare` / `-sunburst` | Creating or editing any image |
+| image | Haiku + Codex image generation (or `gpt-image-2.5-flare` / `-sunburst` on the API) | Creating or editing any image |
 
 Rules on top of Jev:
 - Security-sensitive work (Jev's `security` check over 50%) never goes to Fable; it goes to Opus, because Fable carries extra safeguards for cybersecurity.
@@ -28,9 +28,10 @@ The route descriptions Jev scores against live in `hooks/jev.ts` (`ROUTE_CRITERI
 ## Requirements
 
 - Claude Code **v2.1.287 or later**, in the terminal or the Code tab of the Desktop app (mods run there)
-- For the image tools: on macOS or Linux, `curl` and `openssl` on the PATH; on Windows, nothing extra, since the mod runs `curl.exe` and `powershell.exe` from System32 by absolute path (they upload images for edits and write image files)
 - `TYPESAFE_API_KEY`: a Jev key from console.typesafe.ai (early access). Without it the router still works on the Haiku fallback.
-- `OPENAI_API_KEY`: needs access to `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst`
+- For images, either backend:
+  - **codex (default):** the Codex CLI, recent enough for OpenAI's current models (0.162 or later; older versions are refused), signed in with `codex login` using your ChatGPT account. On Windows the mod runs `node.exe` from `Program Files\nodejs` on Codex's npm install by absolute path; if yours lives elsewhere, set `codexPath`.
+  - **api:** `OPENAI_API_KEY` with access to `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst`. On macOS or Linux, `curl` and `openssl` on the PATH; on Windows nothing extra (System32 `curl.exe` and `powershell.exe` by absolute path).
 
 Put the keys in your shell profile or in `~/.claude/settings.json` under `env`. There is no `.env` file: the mod reads Claude Code's own environment.
 
@@ -81,6 +82,8 @@ Change these in `/config` (each is a row there) or under `pluginConfigs` in sett
 | `confirmFable` | `true` | Ask before any Fable turn |
 | `routeSubagents` | `true` | Subagents without a model follow the route |
 | `imageDir` | `assets/generated` | Where images are saved |
+| `imageBackend` | `codex` | `codex` (ChatGPT plan, through the Codex CLI) or `api` (Images API, `OPENAI_API_KEY`). No automatic fallback between them |
+| `codexPath` | empty | Where Codex is, if not found automatically: `codex.js` on Windows, the `codex` executable elsewhere |
 | `logPath` | `.jev-router/decisions.jsonl` | Decision log (add it to `.gitignore`) |
 
 ## The decision log
@@ -91,7 +94,8 @@ Every decision, override, image call and finished turn (with its token usage) is
 
 - **Model switches cost cache.** Prompt caching is per model, so a turn routed to a different model than the previous one re-reads the conversation without the cache. The route holds for a whole turn to limit this; frequent switching in a long session costs more than it looks.
 - **Jev sees the prompt plus the tail of Claude's last reply**, so a short follow-up like "yes, do that" routes with its context.
-- **Image size.** Image files are decoded from the API's base64 output; very large outputs (over about 4 MB of base64) can exceed the mod API's read limit on edits.
+- **Codex images take about a minute.** Each one is a full Codex agent run (generation plus saving), sandboxed to `imageDir`, and it counts against your ChatGPT plan's Codex limits. The mod checks that the file exists afterwards rather than trusting Codex's reply.
+- **Image size (api backend).** Image files are decoded from the API's base64 output; very large outputs (over about 4 MB of base64) can exceed the mod API's read limit on edits.
 - **Trust.** A mod runs with your permissions and reads the two API keys from your environment. Keep it in a folder or marketplace you control.
 
 ## Tests

@@ -87,9 +87,7 @@ async function saveFirstImage($: EngineInterface, json: string, dir: string, a: 
   }
   if (!b64) return { ok: false, error: 'OpenAI answered without image data' }
 
-  const ext = a.outputFormat === 'jpeg' ? 'jpg' : (a.outputFormat ?? 'png')
-  const name = sanitize(a.filename) ?? `${slug(a.prompt)}-${await $.clock.now()}`
-  const path = `${dir}/${name}.${ext}`
+  const path = await outputPath($, dir, a)
 
   // $.fs.write writes text only, so a host tool decodes the base64 into the binary file.
   const sys = await windowsSystem32($)
@@ -121,7 +119,7 @@ const DECODE_PS =
  * Claude Code was launched, so on Windows the System32 tools are run by absolute path.
  * Resolves undefined everywhere else.
  */
-async function windowsSystem32($: EngineInterface): Promise<string | undefined> {
+export async function windowsSystem32($: EngineInterface): Promise<string | undefined> {
   if ((await $.env.get('OS')) !== 'Windows_NT') return undefined
   return `${(await $.env.get('SystemRoot')) ?? 'C:\\Windows'}\\System32`
 }
@@ -142,6 +140,13 @@ export function slug(s: string): string {
       .replace(/^-+|-+$/g, '')
       .slice(0, 40) || 'image'
   )
+}
+
+/** Where an image is saved: `<dir>/<filename or prompt slug>.<format>`, the same for every backend. */
+export async function outputPath($: EngineInterface, dir: string, a: ImageArgs): Promise<string> {
+  const ext = a.outputFormat === 'jpeg' ? 'jpg' : (a.outputFormat ?? 'png')
+  const name = sanitize(a.filename) ?? `${slug(a.prompt)}-${await $.clock.now()}`
+  return `${dir}/${name}.${ext}`
 }
 
 function sanitize(name: string | undefined): string | undefined {

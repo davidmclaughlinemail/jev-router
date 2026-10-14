@@ -1,6 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import { type Classification, type Route, ROUTES, classifyWithHaiku, classifyWithJev, isRoute, ranked } from './jev'
 import { type ImageTier, editImage, generateImage } from './images'
+import { codexImage } from './codex'
 
 /** One routing decision: what Jev said, what was chosen, and why. */
 type Decision = {
@@ -24,6 +25,8 @@ type Opts = {
   confirmFable: boolean
   routeSubagents: boolean
   imageDir: string
+  imageBackend: 'codex' | 'api'
+  codexPath: string
   logPath: string
 }
 
@@ -138,6 +141,8 @@ function readOptions(options: PluginOptions): Opts {
     confirmFable: options.confirmFable !== false,
     routeSubagents: options.routeSubagents !== false,
     imageDir: String(options.imageDir ?? 'assets/generated'),
+    imageBackend: options.imageBackend === 'api' ? 'api' : 'codex',
+    codexPath: String(options.codexPath ?? ''),
     logPath: String(options.logPath ?? '.jev-router/decisions.jsonl'),
   }
 }
@@ -370,7 +375,7 @@ async function registerTools($: EngineInterface) {
   await $.tool.register({
     name: 'generate_image',
     description:
-      'Generate an image with OpenAI GPT-Image-2.5 and save it into the project. Use this for ALL image creation: illustrations, logos, icons, photos, mockup images, pictures of diagrams. Never draw images by hand in code when this tool fits. Returns the saved file path.',
+      'Generate an image with OpenAI image generation and save it into the project. Takes up to a few minutes. Use this for ALL image creation: illustrations, logos, icons, photos, mockup images, pictures of diagrams. Never draw images by hand in code when this tool fits. Returns the saved file path.',
     inputSchema: {
       type: 'object',
       properties: { prompt: { type: 'string', description: 'A full description of the image.' }, ...common },
@@ -381,7 +386,7 @@ async function registerTools($: EngineInterface) {
   await $.tool.register({
     name: 'edit_image',
     description:
-      'Edit or restyle existing images with OpenAI GPT-Image-2.5: change one element, swap a background, combine references. Use this for ALL image edits. Returns the saved file path.',
+      'Edit or restyle existing images with OpenAI image generation (takes up to a few minutes): change one element, swap a background, combine references. Use this for ALL image edits. Returns the saved file path.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -396,30 +401,40 @@ async function registerTools($: EngineInterface) {
   })
 }
 
+// The image tools run through Codex on the user's ChatGPT plan by default, or the Images API
+// when imageBackend is "api". There is no automatic fallback between them: the setting decides.
 async function runGenerate($: EngineInterface, a: Record<string, unknown>): Promise<string> {
-  const key = await $.env.get('OPENAI_API_KEY')
-  if (!key) return 'OPENAI_API_KEY is not set, so no image was generated. Ask the user to set it.'
-  const out = await generateImage($, key, S.opt.imageDir, {
-    prompt: String(a.prompt ?? ''),
-    tier: pickTier(a.tier),
-    size: str(a.size),
-    quality: str(a.quality),
-    background: str(a.background),
-    outputFormat: str(a.output_format),
-    filename: str(a.filename),
-  })
-  await writeLog($, { type: 'image', at: new Date().toISOString(), op: 'generate', ...out })
+  const args = imageArgs(a)
+  let out
+  if (S.opt.imageBackend === 'codex') {
+    out = await codexImage($, S.opt.codexPath, S.opt.imageDir, args)
+  } else {
+    const key = await $.env.get('OPENAI_API_KEY')
+    if (!key) return 'OPENAI_API_KEY is not set, so no image was generated. Ask the user to set it, or to switch imageBackend to codex in /config.'
+    out = await generateImage($, key, S.opt.imageDir, args)
+  }
+  await writeLog($, { type: 'image', at: new Date().toISOString(), op: 'generate', backend: S.opt.imageBackend, ...out })
   return out.ok ? `Saved ${out.path} (${out.model}).` : `Image generation failed: ${out.error}`
 }
 
 async function runEdit($: EngineInterface, a: Record<string, unknown>): Promise<string> {
-  const key = await $.env.get('OPENAI_API_KEY')
-  if (!key) return 'OPENAI_API_KEY is not set, so no image was edited. Ask the user to set it.'
   const paths = Array.isArray(a.image_paths) ? a.image_paths.map(String) : []
   if (paths.length === 0) return 'edit_image needs at least one path in image_paths.'
-  const out = await editImage($, key, S.opt.imageDir, {
-    imagePaths: paths,
-    maskPath: str(a.mask_path),
+  const args = { ...imageArgs(a), imagePaths: paths, maskPath: str(a.mask_path) }
+  let out
+  if (S.opt.imageBackend === 'codex') {
+    out = await codexImage($, S.opt.codexPath, S.opt.imageDir, args)
+  } else {
+    const key = await $.env.get('OPENAI_API_KEY')
+    if (!key) return 'OPENAI_API_KEY is not set, so no image was edited. Ask the user to set it, or to switch imageBackend to codex in /config.'
+    out = await editImage($, key, S.opt.imageDir, args)
+  }
+  await writeLog($, { type: 'image', at: new Date().toISOString(), op: 'edit', backend: S.opt.imageBackend, ...out })
+  return out.ok ? `Saved ${out.path} (${out.model}).` : `Image edit failed: ${out.error}`
+}
+
+function imageArgs(a: Record<string, unknown>) {
+  return {
     prompt: String(a.prompt ?? ''),
     tier: pickTier(a.tier),
     size: str(a.size),
@@ -427,9 +442,7 @@ async function runEdit($: EngineInterface, a: Record<string, unknown>): Promise<
     background: str(a.background),
     outputFormat: str(a.output_format),
     filename: str(a.filename),
-  })
-  await writeLog($, { type: 'image', at: new Date().toISOString(), op: 'edit', ...out })
-  return out.ok ? `Saved ${out.path} (${out.model}).` : `Image edit failed: ${out.error}`
+  }
 }
 
 function pickTier(x: unknown): ImageTier {
