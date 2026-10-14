@@ -1,0 +1,6 @@
+# Runtime output of the mod (decision log, generated images)
+.jev-router/
+assets/generated/
+
+# Type files the engine writes when it loads the mod
+.claude-plugin/types/

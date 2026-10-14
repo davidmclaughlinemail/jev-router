@@ -1,0 +1,56 @@
+{
+  "name": "jev-router",
+  "version": "0.1.0",
+  "description": "Routes each Claude Code turn to Haiku, Opus or Fable using TypeSafe's Jev, asks you when Jev is unsure, and sends all image work to OpenAI GPT-Image-2.5.",
+  "author": { "name": "Dave McLaughlin" },
+  "userConfig": {
+    "haikuModel": {
+      "type": "string",
+      "title": "Haiku model id",
+      "description": "Model id used for the haiku route (and to drive image tools).",
+      "default": "claude-haiku-5-5"
+    },
+    "opusModel": {
+      "type": "string",
+      "title": "Opus model id",
+      "description": "Model id used for the opus route and as the fallback.",
+      "default": "claude-opus-5-5"
+    },
+    "fableModel": {
+      "type": "string",
+      "title": "Fable model id",
+      "description": "Model id used for the fable route.",
+      "default": "claude-fable-5-1"
+    },
+    "confidenceThreshold": {
+      "type": "number",
+      "title": "Ask below this confidence",
+      "description": "When Jev's confidence in its top route is below this (0 to 1), you are asked to pick the model.",
+      "default": 0.7
+    },
+    "confirmFable": {
+      "type": "boolean",
+      "title": "Confirm before using Fable",
+      "description": "Ask before any turn runs on Fable, the most expensive route.",
+      "default": true
+    },
+    "routeSubagents": {
+      "type": "boolean",
+      "title": "Route subagents",
+      "description": "Subagents that don't name a model run on the turn's routed model.",
+      "default": true
+    },
+    "imageDir": {
+      "type": "string",
+      "title": "Image output folder",
+      "description": "Where generated and edited images are saved, relative to the project.",
+      "default": "assets/generated"
+    },
+    "logPath": {
+      "type": "string",
+      "title": "Decision log",
+      "description": "JSONL file recording every routing decision, override and turn usage.",
+      "default": ".jev-router/decisions.jsonl"
+    }
+  }
+}
