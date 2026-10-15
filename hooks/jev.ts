@@ -1,7 +1,7 @@
 import type { EngineInterface } from 'claude-code'
 
-export type Route = 'haiku' | 'opus' | 'fable' | 'image'
-export const ROUTES: readonly Route[] = ['haiku', 'opus', 'fable', 'image']
+export type Route = 'haiku' | 'opus' | 'fable' | 'image' | 'security'
+export const ROUTES: readonly Route[] = ['haiku', 'opus', 'fable', 'image', 'security']
 
 export type Classification = {
   source: 'jev' | 'fallback-haiku' | 'default'
@@ -27,6 +27,8 @@ export const ROUTE_CRITERIA: Record<Route, string> = {
     'The hardest work: architecture across a whole codebase, long multi-step agentic tasks, deep debugging with no clear lead, ambiguous problems needing extended reasoning, or high-stakes design decisions.',
   image:
     'The request is mainly to create, generate, draw, edit, restyle or retouch an image, picture, illustration, logo, icon, mockup image, photo or other graphic.',
+  security:
+    'Security work: finding or fixing vulnerabilities, secure code review, threat modeling, dependency risk, validating a security patch, exploits, malware, penetration testing or security tooling.',
 }
 
 /** Ask Jev which route fits. Throws on any transport or schema problem so the caller can fall back. */
@@ -91,7 +93,7 @@ export async function classifyWithHaiku($: EngineInterface, state: string, jevEr
     const r = await $.model.complete({
       model: 'haiku',
       system:
-        'You route requests for a coding agent. Reply with exactly one word: haiku, opus, fable or image.\n' +
+        'You route requests for a coding agent. Reply with exactly one word: haiku, opus, fable, image or security.\n' +
         ROUTES.map(k => `${k}: ${ROUTE_CRITERIA[k]}`).join('\n'),
       prompt: state,
       maxTokens: 5,

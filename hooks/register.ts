@@ -2,6 +2,7 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import { type Classification, type Route, ROUTES, classifyWithHaiku, classifyWithJev, isRoute, ranked } from './jev'
 import { type ImageTier, editImage, generateImage } from './images'
 import { codexImage } from './codex'
+import { type DaybreakProgram, daybreakName, daybreakReview } from './daybreak'
 
 /** One routing decision: what Jev said, what was chosen, and why. */
 type Decision = {
@@ -27,6 +28,8 @@ type Opts = {
   imageDir: string
   imageBackend: 'codex' | 'api'
   codexPath: string
+  daybreakProgram: DaybreakProgram
+  daybreakModel: string
   logPath: string
 }
 
@@ -35,9 +38,13 @@ const LABEL: Record<Route, string> = {
   opus: 'Opus 5.5',
   fable: 'Fable 5.1',
   image: 'Images 2.5',
+  security: 'Daybreak',
 }
 
 const MAX_LOG_LINES = 5000
+
+// Codex writes Daybreak's report here; the folder is the decision log's, which stays out of git.
+const DAYBREAK_REPLY = '.jev-router/daybreak-last-report.md'
 
 // Module state. A reload starts it over, which is fine: the next prompt decides again.
 const S: { opt: Opts; active?: Decision; override?: Override } = { opt: readOptions({}) }
@@ -52,8 +59,8 @@ export const register: Register = (on, options) => {
     try {
       await $.command.register({
         name: 'route',
-        description: 'Jev router: why | haiku | opus | fable | image | lock <route> | auto | log',
-        argumentHint: '[why|haiku|opus|fable|image|lock <route>|auto|log]',
+        description: 'Jev router: why | haiku | opus | fable | image | security | lock <route> | auto | log',
+        argumentHint: '[why|haiku|opus|fable|image|security|lock <route>|auto|log]',
         immediate: true,
       })
     } catch (err) {
@@ -73,15 +80,15 @@ export const register: Register = (on, options) => {
     showStatus($, decision)
     await writeLog($, { type: 'decision', ...decision })
 
-    if (decision.route !== 'image') return next(e)
     const tool = `mcp__${$.plugin.name}__`
-    return next({
-      ...e,
-      context: [
-        ...(e.context ?? []),
-        `jev-router: this request is image work. Create images with ${tool}generate_image and change existing ones with ${tool}edit_image, using tier "${decision.imageTier}". Do not draw images by hand in SVG, HTML or code. Report the saved file path when done.`,
-      ],
-    })
+    const note =
+      decision.route === 'image'
+        ? `jev-router: this request is image work. Create images with ${tool}generate_image and change existing ones with ${tool}edit_image, using tier "${decision.imageTier}". Do not draw images by hand in SVG, HTML or code. Report the saved file path when done.`
+        : decision.route === 'security'
+          ? `jev-router: the user approved sending this security work to OpenAI ${daybreakLabel()}. Call ${tool}daybreak with the full task and the most relevant file paths; it reads the project read-only and returns findings. Report those findings to the user, and change code only if they ask.`
+          : undefined
+    if (!note) return next(e)
+    return next({ ...e, context: [...(e.context ?? []), note] })
   }).catch(($, e, next) => {
     // Never lose a prompt to a routing failure: send it on unrouted (the session's own model).
     $.ui.status('Jev router failed: this turn uses the session model')
@@ -128,6 +135,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: 'mcp__jev-router__edit_image' }, async ($, e) => ({
     result: await runEdit($, e as unknown as Record<string, unknown>),
   })).catch(($, e, next) => ({ result: `edit_image failed inside jev-router: ${next.error?.message ?? 'unknown error'}` }))
+
+  on('tool.call', { tool: 'mcp__jev-router__daybreak' }, async ($, e) => ({
+    result: await runDaybreak($, e as unknown as Record<string, unknown>),
+  })).catch(($, e, next) => ({ result: `daybreak failed inside jev-router: ${next.error?.message ?? 'unknown error'}` }))
 }
 
 // ---------- options ----------
@@ -143,13 +154,16 @@ function readOptions(options: PluginOptions): Opts {
     imageDir: String(options.imageDir ?? 'assets/generated'),
     imageBackend: options.imageBackend === 'api' ? 'api' : 'codex',
     codexPath: String(options.codexPath ?? ''),
+    daybreakProgram: options.daybreakProgram === 'daybreak_red' || options.daybreakProgram === 'standard' ? options.daybreakProgram : 'daybreak_blue',
+    daybreakModel: String(options.daybreakModel ?? ''),
     logPath: String(options.logPath ?? '.jev-router/decisions.jsonl'),
   }
 }
 
-// The image route runs on Haiku: it only has to drive the image tools.
+// The image route runs on Haiku: it only has to drive the image tools. The security route runs on
+// Opus, which hands the analysis to Daybreak and then explains and applies its findings.
 function modelFor(r: Route): string {
-  return r === 'fable' ? S.opt.fableModel : r === 'opus' ? S.opt.opusModel : S.opt.haikuModel
+  return r === 'fable' ? S.opt.fableModel : r === 'opus' || r === 'security' ? S.opt.opusModel : S.opt.haikuModel
 }
 
 // ---------- deciding ----------
@@ -180,11 +194,24 @@ async function decide($: EngineInterface, text: string): Promise<Decision> {
         ? `Jev unavailable (${c.error}); Haiku picked ${route}`
         : `Jev unavailable (${c.error}); default route`
 
-  // Fable carries extra safeguards for security work; send that to Opus instead.
-  if (route === 'fable' && c.securitySensitive > 0.5) {
-    route = 'opus'
-    decidedBy = 'rule'
-    reason = `security-sensitive (${pct(c.securitySensitive)}), so Opus instead of Fable`
+  // Security work goes to OpenAI Daybreak, but only on a yes. Otherwise Opus, never Fable,
+  // which carries extra safeguards for cybersecurity.
+  if (route === 'security' || (route !== 'image' && c.securitySensitive > 0.5)) {
+    const why =
+      route === 'security' ? `${classifierName(c)} flagged security work` : `security-sensitive (${pct(c.securitySensitive)})`
+    const answer = await askSafely(
+      $,
+      `${why}. Send it to OpenAI ${daybreakLabel()}, read-only through Codex?`,
+      ['OpenAI Daybreak', 'Opus 5.5'],
+    )
+    route = answer === 'OpenAI Daybreak' ? 'security' : 'opus'
+    decidedBy = answer === undefined ? 'rule' : 'you'
+    reason =
+      answer === 'OpenAI Daybreak'
+        ? `${why}; you approved Daybreak`
+        : answer === undefined
+          ? `${why}; nobody approved Daybreak, so Opus`
+          : `${why}; you chose Opus over Daybreak`
   }
 
   if (decidedBy === 'jev' && c.source === 'jev' && c.confidence < S.opt.threshold) {
@@ -276,7 +303,12 @@ async function askSafely($: EngineInterface, question: string, labels: string[])
 async function runRouteCommand($: EngineInterface, args: string): Promise<string> {
   const [first, second] = args.trim().toLowerCase().split(/\s+/).filter(Boolean)
 
-  if (!first || first === 'why') return explain(S.active, S.override)
+  if (!first || first === 'why') {
+    // A reload clears S.active; explain the last logged decision instead. Only for display:
+    // S.active stays empty, so a stale decision never routes a turn or approves Daybreak.
+    if (S.active) return explain(S.active, S.override)
+    return explain(await lastLoggedDecision($), S.override, true)
+  }
 
   if (first === 'auto') {
     S.override = undefined
@@ -288,7 +320,7 @@ async function runRouteCommand($: EngineInterface, args: string): Promise<string
 
   const lock = first === 'lock'
   const target = lock ? second : first
-  if (!isRoute(target)) return 'Usage: /route [why | haiku | opus | fable | image | lock <route> | auto | log]'
+  if (!isRoute(target)) return 'Usage: /route [why | haiku | opus | fable | image | security | lock <route> | auto | log]'
 
   S.override = { route: target, sticky: lock }
   $.ui.status(`${LABEL[target]} (${lock ? 'locked' : 'next turn'})`)
@@ -312,13 +344,28 @@ async function recentDecisions($: EngineInterface): Promise<string> {
   return rows.length ? rows.join('\n') : `No decisions logged yet in ${path}.`
 }
 
-function explain(d: Decision | undefined, o: Override | undefined): string {
+async function lastLoggedDecision($: EngineInterface): Promise<Decision | undefined> {
+  const path = S.opt.logPath
+  try {
+    const prior = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+    const last = prior
+      .split('\n')
+      .filter(l => l.includes('"type":"decision"'))
+      .pop()
+    return last ? (JSON.parse(last) as Decision) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function explain(d: Decision | undefined, o: Override | undefined, fromLog = false): string {
   const lines: string[] = []
   if (o) lines.push(o.sticky ? `Locked to ${LABEL[o.route]} (/route auto to unlock).` : `Next turn: ${LABEL[o.route]} (one time).`)
   if (!d) {
     lines.push('No turn routed yet in this session.')
     return lines.join('\n')
   }
+  if (fromLog) lines.push(`From the log (the router reloaded since), routed at ${d.at.slice(11, 19)}:`)
   lines.push(`Last turn: ${LABEL[d.route]} on ${d.model}${d.imageTier ? `, image tier ${d.imageTier}` : ''}.`)
   lines.push(`Why: ${d.reason}.`)
   const c = d.classification
@@ -399,6 +446,41 @@ async function registerTools($: EngineInterface) {
     },
     isDeferred: false,
   })
+  await $.tool.register({
+    name: 'daybreak',
+    description:
+      'Hand security work to OpenAI Daybreak through Codex: vulnerability review, secure code review, threat modeling, dependency risk, validating a security fix. It reads the project read-only, can take several minutes, and returns its findings. Works only on turns the user approved for Daybreak.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task: { type: 'string', description: 'The full security task, with the context Daybreak needs.' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Files to start with, relative to the project.' },
+      },
+      required: ['task'],
+    },
+    isDeferred: false,
+  })
+}
+
+// Daybreak sends project code to OpenAI, so it runs only on a turn the user approved:
+// a yes to the dialog, or /route security.
+async function runDaybreak($: EngineInterface, a: Record<string, unknown>): Promise<string> {
+  if (S.active?.route !== 'security') {
+    return 'The user has not approved Daybreak for this turn, so nothing was sent to OpenAI. They can approve it with /route security.'
+  }
+  const task = String(a.task ?? '').trim()
+  if (!task) return 'daybreak needs a task.'
+  const paths = Array.isArray(a.paths) ? a.paths.map(String) : []
+  const out = await daybreakReview($, S.opt.codexPath, S.opt.daybreakProgram, S.opt.daybreakModel, DAYBREAK_REPLY, task, paths)
+  await writeLog($, {
+    type: 'daybreak',
+    at: new Date().toISOString(),
+    program: S.opt.daybreakProgram,
+    model: S.opt.daybreakModel || 'codex default',
+    ok: out.ok,
+    ...(out.ok ? {} : { error: out.error }),
+  })
+  return out.ok ? `OpenAI ${daybreakLabel()} reported:\n\n${out.report}` : `Daybreak failed: ${out.error}`
 }
 
 // The image tools run through Codex on the user's ChatGPT plan by default, or the Images API
@@ -451,6 +533,12 @@ function pickTier(x: unknown): ImageTier {
 }
 
 // ---------- helpers ----------
+
+// "Daybreak Blue", or "Daybreak Blue (gpt-6-sol)" when a model is pinned.
+function daybreakLabel(): string {
+  const name = daybreakName(S.opt.daybreakProgram)
+  return S.opt.daybreakModel ? `${name} (${S.opt.daybreakModel})` : name
+}
 
 function classifierName(c: Classification): string {
   return c.source === 'jev' ? 'Jev' : c.source === 'fallback-haiku' ? 'Haiku' : 'default'

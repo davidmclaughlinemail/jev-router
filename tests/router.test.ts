@@ -203,12 +203,38 @@ describe('routing', () => {
     expect(seen.stepModels).toEqual(['claude-opus-5-5'])
   })
 
-  test('security work never goes to Fable', async ($, on) => {
+  test('security work asks for Daybreak, and a yes routes it there', async ($, on) => {
+    const seen = world(on, {
+      jev: jevBody({ fable: 0.9, opus: 0.08, haiku: 0.02, image: 0 }, { security: 0.93 }),
+      answer: 'OpenAI Daybreak',
+    })
+    await $.prompt.submit(submit('Audit our auth service for injection vulnerabilities'))
+    await drain($.turn.step(STEP))
+    expect(seen.asked[0]).toContain('Send it to OpenAI Daybreak Blue, read-only')
+    // Opus drives the turn and hands the analysis to the daybreak tool.
+    expect(seen.stepModels).toEqual(['claude-opus-5-5'])
+    expect(seen.context.join('\n')).toContain('mcp__jev-router__daybreak')
+    expect(seen.status.at(-1)).toBe('Daybreak (you 90%)')
+  })
+
+  test('security work nobody approves runs on Opus, never Fable', async ($, on) => {
     const seen = world(on, { jev: jevBody({ fable: 0.9, opus: 0.08, haiku: 0.02, image: 0 }, { security: 0.93 }) })
     await $.prompt.submit(submit('Audit our auth service for injection vulnerabilities'))
     await drain($.turn.step(STEP))
-    expect(seen.asked).toEqual([])
+    expect(seen.asked.length).toBe(1)
     expect(seen.stepModels).toEqual(['claude-opus-5-5'])
+    expect(seen.context.join('\n')).not.toContain('daybreak')
+    const why = await $.command.run(route('why'))
+    expect(why.text).toContain('nobody approved Daybreak, so Opus')
+  })
+
+  test('choosing Opus over Daybreak is recorded as your pick', async ($, on) => {
+    const seen = world(on, { env: { OPENAI_API_KEY: 'x' }, haikuWord: 'security', answer: 'Opus 5.5' })
+    await $.prompt.submit(submit('Threat-model the upload endpoint'))
+    await drain($.turn.step(STEP))
+    expect(seen.asked[0]).toContain('Haiku flagged security work')
+    expect(seen.stepModels).toEqual(['claude-opus-5-5'])
+    expect(seen.status.at(-1)).toBe('Opus 5.5 (you 75%)')
   })
 
   test('image work runs on Haiku and is told to use the image tools', async ($, on) => {
@@ -289,6 +315,22 @@ describe('/route', () => {
     await $.prompt.submit(submit('three'))
     const after = await $.command.run(route('why'))
     expect(after.text).toContain('Jev picked haiku at 95%')
+  })
+
+  test('why after a reload explains the last logged decision, without routing on it', async ($, on) => {
+    const seen = world(on, { jev: jevBody({ haiku: 0.95, opus: 0.05, fable: 0, image: 0 }) })
+    // A fresh module with a log left by the session before the reload.
+    const logged = { type: 'decision', at: '2026-10-15T00:50:31.621Z', prompt: 'design billing', route: 'fable', model: 'claude-fable-5-1', decidedBy: 'jev', reason: 'Jev picked fable at 81%' }
+    seen.files.set('.jev-router/decisions.jsonl', JSON.stringify(logged) + '\n')
+
+    const why = await $.command.run(route('why'))
+    expect(why.text).toContain('From the log (the router reloaded since), routed at 00:50:31')
+    expect(why.text).toContain('Last turn: Fable 5.1 on claude-fable-5-1')
+    expect(why.text).toContain('Jev picked fable at 81%')
+
+    // The logged decision is display only: steps keep the session's model.
+    await drain($.turn.step(STEP))
+    expect(seen.stepModels).toEqual(['claude-sonnet-5-5'])
   })
 })
 
@@ -482,12 +524,94 @@ describe('image tools (codex backend, the default)', () => {
     expect(result(r)).toContain('npm install -g @openai/codex')
   })
 
-  test('codexPath overrides where Codex is', { options: { codexPath: 'D:\\tools\\codex.js' } }, async ($, on) => {
+  test('codexPath overrides where Codex is',{ options: { codexPath: 'D:\\tools\\codex.js' } }, async ($, on) => {
     const seen = world(on, { env: WINDOWS })
     seen.files.set(NODE, 'exe')
     seen.files.set('D:\\tools\\codex.js', 'js')
     const runs = codex(on, seen)
     await $.tool.call({ tool: 'mcp__jev-router__generate_image', prompt: 'x' } as never)
     expect(runs[0]?.argv.slice(0, 2)).toEqual([NODE, 'D:\\tools\\codex.js'])
+  })
+})
+
+describe('daybreak tool', () => {
+  const REPORT = '.jev-router/daybreak-last-report.md'
+  const result = (r: unknown) => String((r as { result?: unknown }).result)
+
+  // Codex is answered in memory: it writes its final message to the -o file.
+  function codex(on: Parameters<typeof world>[0], seen: Seen, report = 'High: SQL injection in src/db.ts:42. Use a parameterized query.') {
+    const runs: { argv: readonly string[]; stdin?: string }[] = []
+    on('process.run', async ($, e) => {
+      runs.push({ argv: e.argv, stdin: e.init?.stdin })
+      // Overwrite the file the mod cleared, under whatever path the engine resolved it to.
+      for (const k of seen.files.keys()) if (k.replaceAll('\\', '/').endsWith(REPORT)) seen.files.set(k, report)
+      return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    })
+    return runs
+  }
+
+  test('refuses on a turn nobody approved, and sends nothing', async ($, on) => {
+    const seen = world(on, { jev: jevBody({ opus: 0.9, haiku: 0.1, fable: 0, image: 0 }) })
+    const runs = codex(on, seen)
+    await $.prompt.submit(submit('Refactor the billing module'))
+    const r = await $.tool.call({ tool: 'mcp__jev-router__daybreak', task: 'Review auth' } as never)
+    expect(runs).toEqual([])
+    expect(result(r)).toContain('has not approved Daybreak')
+  })
+
+  test('a logged security approval from before a reload approves nothing', async ($, on) => {
+    const seen = world(on, { jev: jevBody({ opus: 0.9, haiku: 0.1, fable: 0, image: 0 }) })
+    const runs = codex(on, seen)
+    const logged = { type: 'decision', at: '2026-10-15T00:50:31.621Z', prompt: 'audit auth', route: 'security', model: 'claude-opus-5-5', decidedBy: 'you', reason: 'you approved Daybreak' }
+    seen.files.set('.jev-router/decisions.jsonl', JSON.stringify(logged) + '\n')
+
+    const why = await $.command.run(route('why'))
+    expect(why.text).toContain('Last turn: Daybreak')
+    const r = await $.tool.call({ tool: 'mcp__jev-router__daybreak', task: 'Review auth' } as never)
+    expect(runs).toEqual([])
+    expect(result(r)).toContain('has not approved Daybreak')
+  })
+
+  test('after a yes, runs Codex read-only on the Daybreak model and returns the report', async ($, on) => {
+    const seen = world(on, { env: {}, haikuWord: 'security', answer: 'OpenAI Daybreak' })
+    seen.files.set('src/db.ts', 'code')
+    const runs = codex(on, seen)
+    await $.prompt.submit(submit('Check src/db.ts for injection'))
+    const r = await $.tool.call({ tool: 'mcp__jev-router__daybreak', task: 'Find injection bugs', paths: ['src/db.ts'] } as never)
+
+    expect(runs.length).toBe(1)
+    const argv = runs[0]?.argv ?? []
+    expect(argv.slice(0, 2)).toEqual(['codex', 'exec'])
+    expect(argv[argv.indexOf('--cyber-access-program') + 1]).toBe('daybreak_blue')
+    // No model pinned by default: Codex uses its own.
+    expect(argv).not.toContain('-m')
+    expect(argv[argv.indexOf('-s') + 1]).toBe('read-only')
+    expect(argv.at(-1)).toBe('-')
+    // The task rides on stdin, not the command line.
+    expect(argv.join(' ')).not.toContain('injection')
+    expect(runs[0]?.stdin).toContain('Task: Find injection bugs')
+    expect(runs[0]?.stdin).toContain('- src/db.ts')
+    expect(result(r)).toContain('OpenAI Daybreak Blue reported:')
+    expect(result(r)).toContain('SQL injection in src/db.ts:42')
+  })
+
+  test('/route security approves it, and the settings pick program and model', { options: { daybreakProgram: 'daybreak_red', daybreakModel: 'gpt-6-cyber' } }, async ($, on) => {
+    const seen = world(on, { jev: jevBody({ opus: 0.9, haiku: 0.1, fable: 0, image: 0 }) })
+    const runs = codex(on, seen)
+    await $.command.run(route('security'))
+    await $.prompt.submit(submit('Review the session handling'))
+    await $.tool.call({ tool: 'mcp__jev-router__daybreak', task: 'Review sessions' } as never)
+    expect(seen.asked).toEqual([])
+    const argv = runs[0]?.argv ?? []
+    expect(argv[argv.indexOf('--cyber-access-program') + 1]).toBe('daybreak_red')
+    expect(argv[argv.indexOf('-m') + 1]).toBe('gpt-6-cyber')
+  })
+
+  test('an empty report is a failure, not a clean bill of health', async ($, on) => {
+    const seen = world(on, { env: {}, haikuWord: 'security', answer: 'OpenAI Daybreak' })
+    codex(on, seen, '')
+    await $.prompt.submit(submit('Audit dependencies'))
+    const r = await $.tool.call({ tool: 'mcp__jev-router__daybreak', task: 'Audit dependencies' } as never)
+    expect(result(r)).toContain('Daybreak failed: Daybreak finished without a report.')
   })
 })

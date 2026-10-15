@@ -1,7 +1,7 @@
 {
   "name": "jev-router",
   "version": "0.1.0",
-  "description": "Routes each Claude Code turn to Haiku, Opus or Fable using TypeSafe's Jev, asks you when Jev is unsure, and sends all image work to OpenAI GPT-Image-2.5.",
+  "description": "Routes each Claude Code turn to Haiku, Opus or Fable using TypeSafe's Jev, asks you when Jev is unsure, sends all image work to OpenAI GPT-Image-2.5, and offers security work to OpenAI Daybreak.",
   "author": { "name": "Dave McLaughlin" },
   "userConfig": {
     "haikuModel": {
@@ -57,6 +57,19 @@
       "type": "string",
       "title": "Codex location",
       "description": "Leave empty to find Codex automatically. Otherwise the path to codex.js (Windows) or the codex executable.",
+      "default": ""
+    },
+    "daybreakProgram": {
+      "type": "string",
+      "title": "Daybreak access program",
+      "description": "Cyber access program Codex requests for approved security work (--cyber-access-program). Your OpenAI account decides whether it is granted.",
+      "options": ["daybreak_blue", "daybreak_red", "standard"],
+      "default": "daybreak_blue"
+    },
+    "daybreakModel": {
+      "type": "string",
+      "title": "Daybreak model",
+      "description": "Leave empty for Codex's default model. Otherwise the OpenAI model id security work runs on.",
       "default": ""
     },
     "logPath": {

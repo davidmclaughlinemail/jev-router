@@ -83,7 +83,7 @@ function instructions(a: CodexImageArgs, absPath: string): string {
  * which can't be run by argv, so node.exe runs Codex's own codex.js by absolute path.
  * `codexPath` overrides where codex.js (or, elsewhere, the codex executable) lives.
  */
-async function codexLaunch($: EngineInterface, codexPath: string): Promise<{ argv: string[] } | { error: string }> {
+export async function codexLaunch($: EngineInterface, codexPath: string): Promise<{ argv: string[] } | { error: string }> {
   if (!(await windowsSystem32($))) {
     if (!codexPath) return { argv: ['codex'] }
     return { argv: codexPath.endsWith('.js') ? ['node', codexPath] : [codexPath] }
@@ -97,10 +97,10 @@ async function codexLaunch($: EngineInterface, codexPath: string): Promise<{ arg
   return { argv: [node, script] }
 }
 
-async function absolute($: EngineInterface, path: string): Promise<string> {
+export async function absolute($: EngineInterface, path: string): Promise<string> {
   return (await $.fs.stat(path, { resolve: true })).realPath ?? path
 }
 
-function tail(s: string): string {
+export function tail(s: string): string {
   return s.trim().split('\n').slice(-3).join(' | ').slice(0, 400)
 }
